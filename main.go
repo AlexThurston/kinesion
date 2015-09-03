@@ -1,9 +1,9 @@
 package main
 
 import (
-	"fmt"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/kinesis"
+	"log"
 	"time"
 )
 
@@ -23,12 +23,12 @@ func createStream() {
 
 	_, err := k.CreateStream(cs)
 	if err != nil {
-		fmt.Println(err)
+		log.Println(err)
 		return
 	}
 
 	for getStreamStatus(streamName) != kinesis.StreamStatusActive {
-		fmt.Println("Waiting for stream to be created")
+		log.Println("Waiting for stream to be created")
 		time.Sleep(5 * time.Second)
 	}
 }
@@ -36,10 +36,10 @@ func createStream() {
 func listAllStreams() {
 	listResp, err := k.ListStreams(ls)
 	if err != nil {
-		fmt.Println(err)
+		log.Println(err)
 		return
 	}
-	fmt.Println(listResp)
+	log.Println(listResp)
 }
 
 func describeStream() {
@@ -49,10 +49,10 @@ func describeStream() {
 
 	resp, err := k.DescribeStream(params)
 	if err != nil {
-		fmt.Println(err)
+		log.Println(err)
 		return
 	}
-	fmt.Println(resp)
+	log.Println(resp)
 }
 
 func getStreamStatus(streamName string) string {
@@ -62,7 +62,7 @@ func getStreamStatus(streamName string) string {
 
 	resp, err := k.DescribeStream(params)
 	if err != nil {
-		fmt.Println(err)
+		log.Println(err)
 		return ""
 	}
 
@@ -75,7 +75,7 @@ func deleteStream() {
 	}
 	_, err = k.DeleteStream(ds)
 	if err != nil {
-		fmt.Println(err)
+		log.Println(err)
 		return
 	}
 
@@ -85,44 +85,49 @@ func deleteStream() {
 	for {
 		descResp, err := k.DescribeStream(describeStream)
 		if err != nil {
-			fmt.Println("Stream has been removed")
+			log.Println("Stream has been removed")
 			break
 		}
 		if *descResp.StreamDescription.StreamStatus == kinesis.StreamStatusDeleting {
-			fmt.Println("Still deleting stream")
+			log.Println("Still deleting stream")
 		}
 		time.Sleep(5 * time.Second)
 	}
 
 	listResp, err := k.ListStreams(ls)
 	if err != nil {
-		fmt.Println(err)
+		log.Println(err)
 		return
 	}
-	fmt.Println(listResp)
+	log.Println(listResp)
 }
 
-func startProducer() {
+func startProducer(done chan bool) {
 	message := "ALEX"
-	for produce {
-		message += "1"
-		params := &kinesis.PutRecordInput{
-			Data:         []byte(message),
-			PartitionKey: aws.String("foo"),
-			StreamName:   aws.String(streamName),
-		}
-
-		_, err := k.PutRecord(params)
-		if err != nil {
-			fmt.Println(err)
+	for {
+		select {
+		case <-done:
 			return
+		default:
+			message += "1"
+			params := &kinesis.PutRecordInput{
+				Data:         []byte(message),
+				PartitionKey: aws.String("foo"),
+				StreamName:   aws.String(streamName),
+			}
+
+			_, err := k.PutRecord(params)
+			if err != nil {
+				log.Println(err)
+				return
+			}
+			// log.Printf("Produced message\n")
+			time.Sleep(1 * time.Second)
 		}
-		// fmt.Printf("Produced message\n")
-		time.Sleep(1 * time.Second)
 	}
 }
 
-func startConsumer() {
+func startConsumer(done chan bool) {
 	siParams := &kinesis.GetShardIteratorInput{
 		ShardId:           aws.String("0"),
 		ShardIteratorType: aws.String(kinesis.ShardIteratorTypeLatest),
@@ -131,7 +136,7 @@ func startConsumer() {
 
 	siResp, err := k.GetShardIterator(siParams)
 	if err != nil {
-		fmt.Println(err)
+		log.Println(err)
 		return
 	}
 
@@ -141,52 +146,60 @@ func startConsumer() {
 	}
 	getResp, err := k.GetRecords(params)
 	for _, record := range getResp.Records {
-		fmt.Println(string(record.Data))
+		log.Println(string(record.Data))
 	}
 
-	for consume {
-		params := &kinesis.GetRecordsInput{
-			ShardIterator: aws.String(*getResp.NextShardIterator),
-			Limit:         aws.Int64(1),
-		}
-
-		getResp, err = k.GetRecords(params)
-		if err != nil {
-			fmt.Println(err)
+	for {
+		select {
+		case <-done:
 			return
-		}
+		default:
+			params := &kinesis.GetRecordsInput{
+				ShardIterator: aws.String(*getResp.NextShardIterator),
+				Limit:         aws.Int64(1),
+			}
 
-		for _, record := range getResp.Records {
-			fmt.Println(string(record.Data))
+			getResp, err = k.GetRecords(params)
+			if err != nil {
+				log.Println(err)
+				return
+			}
+
+			for _, record := range getResp.Records {
+				log.Println(string(record.Data))
+			}
+			time.Sleep(1 * time.Second)
 		}
-		time.Sleep(1 * time.Second)
 	}
 }
 
 func main() {
-	fmt.Println("Hello Kinesis")
+	consumerDone := make(chan bool)
+	producerDone := make(chan bool)
 
-	fmt.Println("Creating stream...")
+	log.Println("Hello Kinesis")
+
+	log.Println("Creating stream...")
 	createStream()
 
-	fmt.Println("Listing all streams...")
+	log.Println("Listing all streams...")
 	listAllStreams()
 
-	fmt.Println("Describing created stream")
+	log.Println("Describing created stream")
 	describeStream()
 
-	fmt.Println("Starting producer...")
-	go startProducer()
-	fmt.Println("Starting consumer...")
-	go startConsumer()
+	log.Println("Starting producer...")
+	go startProducer(producerDone)
+	log.Println("Starting consumer...")
+	go startConsumer(consumerDone)
 
-	fmt.Println("Waiting 10 seconds...")
+	log.Println("Waiting 10 seconds...")
 	time.Sleep(10 * time.Second)
 
-	fmt.Println("Stopping producer and consumer...")
-	produce = false
-	consume = false
+	log.Println("Stopping producer and consumer...")
+	producerDone <- true
+	consumerDone <- true
 
-	fmt.Println("Deleting stream...")
+	log.Println("Deleting stream...")
 	deleteStream()
 }
